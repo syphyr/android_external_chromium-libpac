@@ -361,6 +361,19 @@ TEST(ProxyResolverV8Test, JavascriptLibrary) {
 TEST(ProxyResolverV8Test, NoSetPacScript) {
   ProxyResolverV8WithMockBindings resolver(new MockJSBindings());
 
+TEST(ProxyResolverV8Test, B_147664838) {
+  ProxyResolverV8WithMockBindings resolver(new MockJSBindings());
+  int result = resolver.SetPacScript(SCRIPT(B_147664838_JS));
+  EXPECT_EQ(OK, result);
+
+  // Execute FindProxyForURL().
+  result = resolver.GetProxyForURL(kQueryUrl, kQueryHost, &kResults);
+
+  EXPECT_EQ(OK, result);
+  std::vector<std::string> proxies = string16ToProxyList(kResults);
+  EXPECT_EQ(1U, proxies.size());
+  EXPECT_EQ("DIRECT", proxies[0]);
+}
 
   // Resolve should fail, as we are not yet initialized with a script.
   int result = resolver.GetProxyForURL(kQueryUrl, kQueryHost, &kResults);

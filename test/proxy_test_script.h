@@ -4,6 +4,30 @@
 #ifndef PROXY_TEST_SCRIPT_H_
 #define PROXY_TEST_SCRIPT_H_
 
+#define B_147664838_JS \
+  u""\
+  "function FindProxyForURL(url, host){\n" \
+  "  let re = /x/y;\n" \
+  "  let cnt = 0;\n" \
+  "  let str = re[Symbol.replace](\"x\", {\n" \
+  "    toString: () => {\n" \
+  "      cnt++;\n" \
+  "      if (cnt == 2) {\n" \
+  "        re.lastIndex = {valueOf: () => {\n" \
+  "          re.x = 42;\n" \
+  "          return 0;\n" \
+  "        }};\n" \
+  "      }\n" \
+  "      return 'y$';\n" \
+  "    }\n" \
+  "  });\n" \
+  "  if (str != \"y$\") {\n" \
+  "    throw \"regex mutated\";\n" \
+  "    return \"FAIL\";\n" \
+  "  }\n" \
+  "  return \"DIRECT\";\n" \
+  "}\n" \
+
 #define BINDING_FROM_GLOBAL_JS \
   "// Calls a bindings outside of FindProxyForURL(). This causes the code to\n" \
   "// get exercised during initialization.\n" \
