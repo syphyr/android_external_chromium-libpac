@@ -148,17 +148,19 @@ inline typename string_type::value_type* WriteInto(string_type* str,
 }
 
 // Converts a V8 String to a UTF8 std::string.
-std::string V8StringToUTF8(v8::Handle<v8::String> s) {
+std::string V8StringToUTF8(v8::Isolate* isolate, v8::Handle<v8::String> s) {
+  int len = s->Length();
   std::string result;
-  s->WriteUtf8(WriteInto(&result, s->Length() + 1));
+  if (len > 0)
+    s->WriteUtf8(isolate, WriteInto(&result, len + 1));
   return result;
 }
 
 // Converts a V8 String to a UTF16 string.
-android::String16 V8StringToUTF16(v8::Handle<v8::String> s) {
+android::String16 V8StringToUTF16(v8::Isolate* isolate, v8::Handle<v8::String> s) {
   int len = s->Length();
   char16_t* buf = new char16_t[len + 1];
-  s->Write(reinterpret_cast<uint16_t*>(buf), 0, len);
+  s->Write(isolate, reinterpret_cast<uint16_t*>(buf), 0, len);
   android::String16 ret(buf, len);
   delete[] buf;
   return ret;
@@ -171,13 +173,13 @@ std::string UTF16ToASCII(const android::String16& str) {
 
 // Converts an ASCII std::string to a V8 string.
 v8::Local<v8::String> ASCIIStringToV8String(v8::Isolate* isolate, const std::string& s) {
-  return v8::String::NewFromUtf8(isolate, s.data(), v8::String::kNormalString, s.size());
+  return v8::String::NewFromUtf8(isolate, s.data(), v8::NewStringType::kNormal, s.size()).ToLocalChecked();
 }
 
 v8::Local<v8::String> UTF16StringToV8String(v8::Isolate* isolate, const android::String16& s) {
   return v8::String::NewFromTwoByte(
       isolate, reinterpret_cast<const uint16_t*>(s.string()),
-      v8::String::kNormalString, s.size());
+      v8::NewStringType::kNormal, s.size()).ToLocalChecked();
 }
 
 // Converts an ASCII string literal to a V8 string.
@@ -185,8 +187,8 @@ v8::Local<v8::String> ASCIILiteralToV8String(v8::Isolate* isolate, const char* a
 //  DCHECK(IsStringASCII(ascii));
   size_t length = strlen(ascii);
   if (length <= kMaxStringBytesForCopy)
-    return v8::String::NewFromUtf8(isolate, ascii, v8::String::kNormalString, length);
-  return v8::String::NewExternal(isolate, new V8ExternalASCIILiteral(ascii, length));
+    return v8::String::NewFromUtf8(isolate, ascii, v8::NewStringType::kNormal, length).ToLocalChecked();
+  return v8::String::NewExternalOneByte(isolate, new V8ExternalASCIILiteral(ascii, length)).ToLocalChecked();
 }
 
 // Stringizes a V8 object by calling its toString() method. Returns true
@@ -198,10 +200,11 @@ bool V8ObjectToUTF16String(v8::Handle<v8::Value> object,
     return false;
 
   v8::HandleScope scope(isolate);
-  v8::Local<v8::String> str_object = object->ToString();
-  if (str_object.IsEmpty())
+  v8::Local<v8::String> str_object;
+
+  if (!object->ToString(isolate->GetCurrentContext()).ToLocal(&str_object))
     return false;
-  *utf16_result = V8StringToUTF16(str_object);
+  *utf16_result = V8StringToUTF16(isolate, str_object);
   return true;
 }
 
@@ -212,7 +215,7 @@ bool GetHostnameArgument(const v8::FunctionCallbackInfo<v8::Value>& args, std::s
   if (args.Length() == 0 || args[0].IsEmpty() || !args[0]->IsString())
     return false;
 
-  const android::String16 hostname_utf16 = V8StringToUTF16(args[0]->ToString());
+  const android::String16 hostname_utf16 = V8StringToUTF16(args.GetIsolate(), v8::Local<v8::String>::Cast(args[0]));
 
   // If the hostname is already in ASCII, simply return it as is.
   if (IsStringASCII(hostname_utf16)) {
@@ -392,13 +395,11 @@ class ProxyResolverV8::Context {
         UTF16StringToV8String(isolate_, url),
         UTF16StringToV8String(isolate_, host) };
 
-    v8::TryCatch try_catch;
-    v8::Local<v8::Value> ret = v8::Function::Cast(*function)->Call(
-        context->Global(), 2, argv);
-
-    if (try_catch.HasCaught()) {
-      error_listener_->ErrorMessage(
-          V8StringToUTF16(try_catch.Message()->Get()));
+    v8::TryCatch try_catch(isolate_);
+    v8::Local<v8::Value> ret;
+    if (!v8::Function::Cast(*function)->Call(
+        context, context->Global(), 2, argv).ToLocal(&ret)) {
+      error_listener_->ErrorMessage(V8StringToUTF16(isolate_, try_catch.Message()->Get()));
       return ERR_PAC_SCRIPT_FAILED;
     }
 
@@ -408,7 +409,7 @@ class ProxyResolverV8::Context {
       return ERR_PAC_SCRIPT_FAILED;
     }
 
-    *results = V8StringToUTF16(ret->ToString());
+    *results = V8StringToUTF16(isolate_, v8::Local<v8::String>::Cast(ret));
 
     if (!IsStringASCII(*results)) {
       // TODO:         Rather than failing when a wide string is returned, we
@@ -431,7 +432,7 @@ class ProxyResolverV8::Context {
     v8_this_.Reset(isolate_, v8::External::New(isolate_, this));
     v8::Local<v8::External> v8_this =
         v8::Local<v8::External>::New(isolate_, v8_this_);
-    v8::Local<v8::ObjectTemplate> global_template = v8::ObjectTemplate::New();
+    v8::Local<v8::ObjectTemplate> global_template = v8::ObjectTemplate::New(isolate_);
 
     // Attach the javascript bindings.
     v8::Local<v8::FunctionTemplate> alert_template =
@@ -514,34 +515,61 @@ class ProxyResolverV8::Context {
   bool GetFindProxyForURL(v8::Local<v8::Value>* function) {
     v8::Local<v8::Context> context =
         v8::Local<v8::Context>::New(isolate_, v8_context_);
-    *function = context->Global()->Get(
-        ASCIILiteralToV8String(isolate_, "FindProxyForURL"));
-    return (*function)->IsFunction();
+
+    v8::TryCatch try_catch(isolate_);
+
+    if (!context->Global()
+        ->Get(context, ASCIILiteralToV8String(isolate_, "FindProxyForURL"))
+        .ToLocal(function)) {
+      HandleError(try_catch.Message());
+    // Fall through since try_catch.HasCaught() will be true
+    }
+
+    if (function->IsEmpty() || try_catch.HasCaught()) {
+      error_listener_->ErrorMessage(android::String16(
+          "Accessing FindProxyForURL threw an exception."));
+      return false;
+    }
+
+    if (!(*function)->IsFunction()) {
+      error_listener_->ErrorMessage(android::String16(
+          "FindProxyForURL is undefined or not a function."));
+      return false;
+    }
+
+    return true;
   }
 
   // Handle an exception thrown by V8.
   void HandleError(v8::Handle<v8::Message> message) {
     if (message.IsEmpty())
       return;
-    error_listener_->ErrorMessage(V8StringToUTF16(message->Get()));
+    error_listener_->ErrorMessage(V8StringToUTF16(isolate_, message->Get()));
   }
 
   // Compiles and runs |script| in the current V8 context.
   // Returns OK on success, otherwise an error code.
   int RunScript(v8::Handle<v8::String> script, const char* script_name) {
-    v8::TryCatch try_catch;
+    v8::Local<v8::Context> context =
+        v8::Local<v8::Context>::New(isolate_, v8_context_);
+    v8::TryCatch try_catch(isolate_);
 
     // Compile the script.
     v8::ScriptOrigin origin =
         v8::ScriptOrigin(ASCIILiteralToV8String(isolate_, script_name));
-    v8::Local<v8::Script> code = v8::Script::Compile(script, &origin);
+    v8::ScriptCompiler::Source script_source(script, origin);
+    v8::Local<v8::Script> code;
+    if (!v8::ScriptCompiler::Compile(
+             context, &script_source, v8::ScriptCompiler::kNoCompileOptions,
+             v8::ScriptCompiler::NoCacheReason::kNoCacheBecausePacScript)
+             .ToLocal(&code)) {
+      HandleError(try_catch.Message());
+      return ERR_PAC_SCRIPT_FAILED;
+    }
 
     // Execute.
-    if (!code.IsEmpty())
-      code->Run();
-
-    // Check for errors.
-    if (try_catch.HasCaught()) {
+    auto result = code->Run(context);
+    if (result.IsEmpty()) {
       HandleError(try_catch.Message());
       return ERR_PAC_SCRIPT_FAILED;
     }
@@ -679,7 +707,7 @@ class ProxyResolverV8::Context {
       return;
     }
 
-    std::string ip_address_list = V8StringToUTF8(args[0]->ToString());
+    std::string ip_address_list = V8StringToUTF8(args.GetIsolate(), v8::Local<v8::String>::Cast(args[0]));
     std::string sorted_ip_address_list;
     bool success = SortIpAddressList(ip_address_list, &sorted_ip_address_list);
     if (!success) {
@@ -698,8 +726,8 @@ class ProxyResolverV8::Context {
       return;
     }
 
-    std::string ip_address = V8StringToUTF8(args[0]->ToString());
-    std::string ip_prefix = V8StringToUTF8(args[1]->ToString());
+    std::string ip_address = V8StringToUTF8(args.GetIsolate(), v8::Local<v8::String>::Cast(args[0]));
+    std::string ip_prefix = V8StringToUTF8(args.GetIsolate(), v8::Local<v8::String>::Cast(args[1]));
     args.GetReturnValue().Set(IsInNetEx(ip_address, ip_prefix));
   }
 
@@ -720,8 +748,8 @@ ProxyResolverV8::ProxyResolverV8(
     : context_(NULL), js_bindings_(custom_js_bindings),
       error_listener_(error_listener) {
   if (!initialized_for_this_process_) {
-    v8::Platform* platform = v8::platform::CreateDefaultPlatform();
-    v8::V8::InitializePlatform(platform);
+    static std::unique_ptr<v8::Platform> platform = v8::platform::NewDefaultPlatform();
+    v8::V8::InitializePlatform(platform.get());
     v8::V8::Initialize();
     initialized_for_this_process_ = true;
   }
